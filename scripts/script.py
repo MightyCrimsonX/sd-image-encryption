@@ -1,6 +1,11 @@
 from modules.script_callbacks import on_app_started
 from sd_image_encryption import password, app
 
+try:
+    import sd_video_encryption  # noqa: F401  # type: ignore
+except Exception as exc:  # noqa: BLE001
+    print(f"[sd-image-encryption] Failed to initialize video encryption module: {exc}")
+
 RST = '\033[0m'
 ORG = '\033[38;5;208m'
 BLUE = '\033[38;5;39m'
