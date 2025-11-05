@@ -16,6 +16,8 @@ except Exception:  # noqa: BLE001
 
 try:
     from modules.video_encrypt import (  # type: ignore
+        CRYPTOGRAPHY_IMPORT_ERROR,
+        HAS_CRYPTOGRAPHY,
         VideoEncryptionError,
         encrypt_video,
     )
@@ -29,6 +31,8 @@ except ModuleNotFoundError:  # pragma: no cover - fallback when running outside 
         sys.modules["modules.video_encrypt"] = module
         spec.loader.exec_module(module)
         from modules.video_encrypt import (  # type: ignore
+            CRYPTOGRAPHY_IMPORT_ERROR,
+            HAS_CRYPTOGRAPHY,
             VideoEncryptionError,
             encrypt_video,
         )
@@ -49,6 +53,14 @@ _SUPPORTED_SUFFIX_EXTS = {".mp4", ".webm"}
 _passphrase: str = ""
 _config: Dict[str, Any] = {}
 _hooks_installed = False
+_crypto_available = bool(locals().get("HAS_CRYPTOGRAPHY", False))
+_crypto_error = locals().get("CRYPTOGRAPHY_IMPORT_ERROR")
+
+if not _crypto_available:
+    LOGGER.warning(
+        "Cryptography package not available; video encryption features are disabled%s",
+        f": {_crypto_error}" if _crypto_error else "",
+    )
 
 
 def _load_config() -> Dict[str, Any]:
@@ -56,10 +68,16 @@ def _load_config() -> Dict[str, Any]:
         try:
             with CONFIG_PATH.open("r", encoding="utf-8") as handle:
                 data = json.load(handle)
-                return {**_DEFAULT_CONFIG, **(data or {})}
+                config = {**_DEFAULT_CONFIG, **(data or {})}
+                if not _crypto_available:
+                    config["enable_video_encryption"] = False
+                return config
         except json.JSONDecodeError as exc:
             LOGGER.error("Failed to load video encryption config: %s", exc)
-    return dict(_DEFAULT_CONFIG)
+    config = dict(_DEFAULT_CONFIG)
+    if not _crypto_available:
+        config["enable_video_encryption"] = False
+    return config
 
 
 def _save_config(config: Dict[str, Any]) -> None:
@@ -88,6 +106,8 @@ def _sanitize_suffix(value: str) -> str:
 
 
 def _should_encrypt_path(path: Optional[Path]) -> bool:
+    if not _crypto_available:
+        return False
     if path is None:
         return False
     if path.suffix.lower() not in _SUPPORTED_SUFFIX_EXTS:
@@ -220,6 +240,10 @@ def install_hooks() -> None:
     if _hooks_installed:
         return
 
+    if not _crypto_available:
+        LOGGER.debug("Skipping video encryption hooks because cryptography is unavailable")
+        return
+
     try:
         import imageio  # type: ignore
     except Exception as exc:  # noqa: BLE001
@@ -239,13 +263,23 @@ def install_hooks() -> None:
 def _apply_settings(enable, passphrase, suffix, keep_plain):
     global _config
     _config = dict(_config)
-    _config["enable_video_encryption"] = bool(enable)
+    if _crypto_available:
+        _config["enable_video_encryption"] = bool(enable)
+    else:
+        _config["enable_video_encryption"] = False
     _config["output_suffix"] = _sanitize_suffix(suffix)
     _config["keep_plain_copy"] = bool(keep_plain)
     _save_config(_config)
     _set_passphrase(passphrase)
 
-    status = "Video encryption enabled." if _config["enable_video_encryption"] else "Video encryption disabled."
+    if not _crypto_available:
+        status = "Video encryption unavailable: install the 'cryptography' package to enable it."
+    else:
+        status = (
+            "Video encryption enabled."
+            if _config["enable_video_encryption"]
+            else "Video encryption disabled."
+        )
     if _config["enable_video_encryption"] and not _passphrase:
         status += " Passphrase is empty; videos will remain unencrypted."
     return status, _config["output_suffix"], passphrase
@@ -254,13 +288,36 @@ def _apply_settings(enable, passphrase, suffix, keep_plain):
 def on_ui_tabs():
     with gr.Blocks() as block:
         gr.Markdown("## SD Image Encryption — Video")
+        if not _crypto_available:
+            gr.Markdown(
+                "⚠️ <b>cryptography</b> no está instalado en este entorno; el cifrado de video "
+                "quedará deshabilitado hasta que agregues la dependencia."
+            )
         with gr.Row():
-            enable = gr.Checkbox(label="Enable video encryption", value=_config.get("enable_video_encryption", False))
-            keep_plain = gr.Checkbox(label="Keep plain video copy", value=_config.get("keep_plain_copy", False))
-        passphrase = gr.Textbox(label="Passphrase", type="password", placeholder="Enter session passphrase", value="")
-        suffix = gr.Textbox(label="Encrypted output suffix", value=_config.get("output_suffix", ".enc"))
+            enable = gr.Checkbox(
+                label="Enable video encryption",
+                value=_config.get("enable_video_encryption", False),
+                interactive=_crypto_available,
+            )
+            keep_plain = gr.Checkbox(
+                label="Keep plain video copy",
+                value=_config.get("keep_plain_copy", False),
+                interactive=_crypto_available,
+            )
+        passphrase = gr.Textbox(
+            label="Passphrase",
+            type="password",
+            placeholder="Enter session passphrase",
+            value="",
+            interactive=_crypto_available,
+        )
+        suffix = gr.Textbox(
+            label="Encrypted output suffix",
+            value=_config.get("output_suffix", ".enc"),
+            interactive=_crypto_available,
+        )
         status = gr.Markdown("", elem_id="sdie-video-status")
-        apply_btn = gr.Button("Apply settings")
+        apply_btn = gr.Button("Apply settings", interactive=_crypto_available)
 
         apply_btn.click(
             fn=_apply_settings,

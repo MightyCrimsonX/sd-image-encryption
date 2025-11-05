@@ -4,12 +4,13 @@ Añade cifrado transparente para imágenes y videos generados por Stable Diffusi
 
 ## Configuración rápida
 
-1. Ejecuta WebUI con `--encrypt-pass=tu_clave` para activar el cifrado de imágenes (flujo existente).
-2. En la pestaña **SD Encryption** dentro de la interfaz, habilita **Enable video encryption**.
-3. Introduce la passphrase de video (no se guarda en disco) y ajusta:
+1. Asegúrate de tener instalada la dependencia `cryptography` (`pip install -r requirements.txt`). Sin ella la pestaña de video permanecerá deshabilitada.
+2. Ejecuta WebUI con `--encrypt-pass=tu_clave` para activar el cifrado de imágenes (flujo existente).
+3. En la pestaña **SD Encryption** dentro de la interfaz, habilita **Enable video encryption**.
+4. Introduce la passphrase de video (no se guarda en disco) y ajusta:
    - **Encrypted output suffix** (`.enc` por defecto).
    - **Keep plain video copy** si deseas conservar el archivo sin cifrar.
-4. Renderiza un video con WAN/WAN Neo. El archivo final `.mp4`/`.webm` se cifrará tras el render y se escribirá junto a un archivo con sufijo (por ejemplo `nombre.mp4.enc`).
+5. Renderiza un video con WAN/WAN Neo. El archivo final `.mp4`/`.webm` se cifrará tras el render y se escribirá junto a un archivo con sufijo (por ejemplo `nombre.mp4.enc`).
 
 > ⚠️ Si la passphrase está vacía, los videos **no** se cifrarán aunque la opción esté habilitada.
 

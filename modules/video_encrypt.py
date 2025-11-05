@@ -9,10 +9,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Tuple
 
-from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives import hashes, hmac
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+try:  # pragma: no cover - exercised indirectly via HAS_CRYPTOGRAPHY
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives import hashes, hmac
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+    HAS_CRYPTOGRAPHY = True
+    CRYPTOGRAPHY_IMPORT_ERROR: ModuleNotFoundError | None = None
+except ModuleNotFoundError as exc:  # pragma: no cover - environment without dependency
+    HAS_CRYPTOGRAPHY = False
+    CRYPTOGRAPHY_IMPORT_ERROR = exc
+
+    class InvalidSignature(Exception):  # type: ignore[override]
+        """Fallback placeholder when cryptography is unavailable."""
+
 
 
 __all__ = [
@@ -21,6 +31,8 @@ __all__ = [
     "HMACValidationError",
     "encrypt_video",
     "decrypt_video",
+    "HAS_CRYPTOGRAPHY",
+    "CRYPTOGRAPHY_IMPORT_ERROR",
 ]
 
 
@@ -52,10 +64,21 @@ class _DerivedKeys:
     hmac: bytes
 
 
+def _require_crypto() -> None:
+    if not HAS_CRYPTOGRAPHY:
+        message = (
+            "Video encryption requires the 'cryptography' package. "
+            "Install it via 'pip install cryptography' to enable this feature."
+        )
+        raise VideoEncryptionError(message) from CRYPTOGRAPHY_IMPORT_ERROR
+
+
 def _derive_keys(passphrase: str, salt: bytes, *, length: int = 32) -> _DerivedKeys:
     """Derive encryption and HMAC keys from a passphrase and salt."""
     if not passphrase:
         raise VideoEncryptionError("Passphrase is required for key derivation.")
+
+    _require_crypto()
 
     hkdf = HKDF(
         algorithm=hashes.SHA256(),
@@ -160,6 +183,8 @@ def encrypt_video(
         raise VideoEncryptionError(f"Unsupported algorithm '{alg}'.")
     chunk_size = _ensure_chunk_size(chunk_size)
 
+    _require_crypto()
+
     in_path = Path(in_path)
     out_path = Path(out_path)
     _sanitize_paths(in_path, out_path)
@@ -209,6 +234,7 @@ def decrypt_video(
 ) -> Path:
     """Decrypt an encrypted video produced by :func:`encrypt_video`."""
     chunk_size = _ensure_chunk_size(chunk_size)
+    _require_crypto()
     in_path = Path(in_path)
     out_path = Path(out_path)
     _sanitize_paths(in_path, out_path)

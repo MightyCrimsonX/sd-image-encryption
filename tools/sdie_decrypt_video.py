@@ -7,7 +7,13 @@ import sys
 from pathlib import Path
 
 try:
-    from modules.video_encrypt import HMACValidationError, VideoDecryptionError, decrypt_video  # type: ignore
+    from modules.video_encrypt import (  # type: ignore
+        CRYPTOGRAPHY_IMPORT_ERROR,
+        HAS_CRYPTOGRAPHY,
+        HMACValidationError,
+        VideoDecryptionError,
+        decrypt_video,
+    )
 except ModuleNotFoundError:  # pragma: no cover - running outside WebUI
     import importlib.util
 
@@ -18,7 +24,13 @@ except ModuleNotFoundError:  # pragma: no cover - running outside WebUI
         module = importlib.util.module_from_spec(spec)
         sys.modules["modules.video_encrypt"] = module
         spec.loader.exec_module(module)
-        from modules.video_encrypt import HMACValidationError, VideoDecryptionError, decrypt_video  # type: ignore
+        from modules.video_encrypt import (  # type: ignore
+            CRYPTOGRAPHY_IMPORT_ERROR,
+            HAS_CRYPTOGRAPHY,
+            HMACValidationError,
+            VideoDecryptionError,
+            decrypt_video,
+        )
     else:  # pragma: no cover
         raise
 
@@ -49,6 +61,13 @@ def configure_logging(verbose: bool = False) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     configure_logging()
+
+    if not HAS_CRYPTOGRAPHY:
+        LOGGER.error(
+            "cryptography dependency missing; install it to decrypt videos%s",
+            f": {CRYPTOGRAPHY_IMPORT_ERROR}" if CRYPTOGRAPHY_IMPORT_ERROR else "",
+        )
+        return 4
 
     input_path = Path(args.input_path)
     output_path = Path(args.output_path)
