@@ -23,6 +23,7 @@ class SdImageEncryption {
         document.querySelectorAll('img').forEach(img => this.processImage(img));
 
         this.addClearButton();
+        this.hookMetadata();
     }
 
     static addClearButton() {
@@ -46,9 +47,64 @@ class SdImageEncryption {
         input.parentNode.appendChild(btn);
     }
 
+    static hookMetadata() {
+        // SwarmUI displays metadata in various places. We need to intercept or update it.
+        // The most common place is likely a metadata viewer or parameter list.
+        // SwarmUI uses `formatMetadata` helper. We can try to monkey-patch it or
+        // observe metadata elements.
+        // For now, let's look for elements with "param_view_block" class which contains text.
+        // But the text is likely already rendered.
+        // If the metadata JSON itself contains "OPPAI:...", SwarmUI might display it as is.
+
+        // Simple polling/observer approach for now to find OPPAI strings in DOM and decrypt them.
+        setInterval(() => this.scanAndDecryptText(), 1000);
+    }
+
+    static scanAndDecryptText() {
+        // Look for text nodes containing OPPAI:
+        // This is expensive if done on whole body. Let's restrict to likely containers if possible.
+        // Or just use a TreeWalker.
+
+        const password = this.getPassword();
+        if (!password) return;
+
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+        let node;
+        while(node = walker.nextNode()) {
+            if (node.nodeValue.includes('OPPAI:')) {
+                // Decrypt
+                const newVal = node.nodeValue.replace(/OPPAI:([A-Za-z0-9+/=]+)/g, (match, b64) => {
+                    try {
+                        return this.decryptString(b64, password);
+                    } catch (e) {
+                        console.error("Failed to decrypt text", e);
+                        return match;
+                    }
+                });
+                if (newVal !== node.nodeValue) {
+                    node.nodeValue = newVal;
+                }
+            }
+        }
+    }
+
+    static decryptString(b64, password) {
+        try {
+            const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+            const decrypted = [];
+            for (let i = 0; i < bytes.length; i++) {
+                const c = bytes[i];
+                const p = password.charCodeAt(i % password.length);
+                decrypted.push(String.fromCharCode(c ^ p));
+            }
+            return decrypted.join('');
+        } catch (e) {
+            return "Decryption Failed";
+        }
+    }
+
     static async processImage(img) {
         if (img.dataset.sdEncryptedProcessed) return;
-        img.dataset.sdEncryptedProcessed = "true";
 
         try {
             // Check if image source is valid
@@ -62,10 +118,12 @@ class SdImageEncryption {
 
             if (this.isEncrypted(buffer)) {
                 console.log("SdImageEncryption: Found encrypted image", img.src);
+                img.dataset.sdEncryptedProcessed = "true"; // Mark as processed so we don't loop
                 await this.decryptAndReplace(img, blob, buffer);
             }
         } catch (e) {
-            console.error("SdImageEncryption: Error processing image", e);
+            // console.error("SdImageEncryption: Error processing image", e);
+            // Silent fail for normal images
         }
     }
 
@@ -101,10 +159,11 @@ class SdImageEncryption {
         // Get password
         let password = this.getPassword();
         if (!password) {
-            // Try to prompt user? Or just wait until they enter it?
-            // For now, let's just log and maybe add a visual indicator
+            // Only blur if we *know* it's encrypted but lack password
             img.style.filter = "blur(10px)";
             img.title = "Encrypted Image - Enter password in settings to view";
+            // Mark for retry later?
+            img.dataset.sdEncryptedProcessed = ""; // Unset so we retry
             return;
         }
 
@@ -118,6 +177,7 @@ class SdImageEncryption {
             img.src = url;
             img.style.filter = "";
             img.title = "Decrypted Image";
+            img.dataset.sdDecrypted = "true";
 
             // TODO: Also decrypt metadata and update data attributes if SwarmUI uses them
         }
