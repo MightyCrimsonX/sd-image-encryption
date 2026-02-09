@@ -10,6 +10,8 @@ using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing;
 using SixLabors.ImageSharp.Formats.Png;
 
+using ISImage = SixLabors.ImageSharp.Image;
+
 namespace SwarmUI.Extensions.SdImageEncryption;
 
 public class SdImageEncryptionExtension : Extension
@@ -30,98 +32,105 @@ public class SdImageEncryptionExtension : Extension
             "",
             FeatureFlag: null,
             OrderPriority: 1,
-            Group: GroupEncryption
+            Group: GroupEncryption,
+            HideFromMetadata: true // Do not store the password in the image metadata!
         ));
 
         // Register the JS viewer
         ScriptFiles.Add("Assets/decrypt_viewer.js");
 
-        // Hook into the PostBatchEvent
-        T2IEngine.PostGenerateEvent += PostGenerateEvent;
-    }
-
-    private void PostGenerateEvent(T2IEngine.PostGenerationEventParams e)
-    {
-        // Check if encryption password is set in the user input
-        if (!e.UserInput.TryGet(EncryptionPassword, out string password) || string.IsNullOrWhiteSpace(password))
+        // Hook into the PostBatchEvent using Lambda to avoid type visibility issues
+        T2IEngine.PostBatchEvent += (e) =>
         {
-            return;
-        }
+            // Check if encryption password is set in the user input
+            if (!e.UserInput.TryGet(EncryptionPassword, out string password) || string.IsNullOrWhiteSpace(password))
+            {
+                return;
+            }
 
-        // Encrypt Pixels
-        if (e.File is SwarmUI.Utils.Image img)
-        {
+            // Encrypt Pixels
+            if (e.Images != null)
+            {
+                foreach (var imgOut in e.Images)
+                {
+                    // Access the SwarmUI Image object
+                    // Note: Img property casts File to Image.
+                    if (imgOut.Img is not SwarmUI.Utils.Image img) continue;
+
+                    try
+                    {
+                        // Get the underlying ImageSharp image (cached)
+                        ISImage isImg = img.ToIS;
+
+                        // We need to modify pixels in-place.
+                        // Assuming standard usage is Rgba32.
+                        if (isImg is Image<Rgba32> rgbaImg)
+                        {
+                            EncryptImage(rgbaImg, password);
+                        }
+                        else
+                        {
+                            // If it's not Rgba32, we clone to Rgba32, encrypt, and unfortunately we can't easily swap it back
+                            // without accessing private members or re-encoding.
+                            // However, SwarmUI primarily uses Rgba32 for generation.
+                            Logs.Warning($"SdImageEncryption: Image is not Rgba32 ({isImg.GetType().Name}), skipping pixel encryption.");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Logs.Error($"Failed to encrypt image pixels: {ex}");
+                    }
+                }
+            }
+
+            // Encrypt Metadata
             try
             {
-                var isImg = img.ToIS;
-                using var rgbaImg = isImg.CloneAs<Rgba32>();
-                EncryptImage(rgbaImg, password);
-
-                // Update the image data
-                // We must use reflection or public field if available. RawData is public.
-                img.RawData = ImageFile.ISImgToPngBytes(rgbaImg);
-                img._CacheISImg = null; // Invalidate cache so it reloads from new RawData
+                EncryptMetadata(e.UserInput, password);
             }
             catch (Exception ex)
             {
-                Logs.Error($"Failed to encrypt image pixels: {ex}");
+                Logs.Error($"Failed to encrypt metadata: {ex}");
             }
-        }
+        };
+    }
 
-        // Encrypt Metadata
-        // We modify the UserInput so that when metadata is generated later, it contains encrypted values.
-        try
+    private void EncryptMetadata(T2IParamInput userInput, string password)
+    {
+        // Encrypt parameters
+        var keys = userInput.InternalSet.ValuesInput.Keys.ToList();
+        foreach (var key in keys)
         {
-            // Encrypt parameters
-            var keys = e.UserInput.InternalSet.ValuesInput.Keys.ToList();
-            foreach (var key in keys)
+            if (userInput.InternalSet.ValuesInput.TryGetValue(key, out object val))
             {
-                // Don't encrypt the password itself if it's there (it shouldn't be in metadata usually but just in case)
-                // Also skip non-string values or complex objects?
-                // Python version converts value to string and encrypts.
-                // We should be careful not to break Swarm's internal logic if it relies on these values later (unlikely for PostGenerateEvent).
-
-                if (e.UserInput.InternalSet.ValuesInput.TryGetValue(key, out object val))
+                if (T2IParamTypes.TryGetType(key, out T2IParamType type, userInput))
                 {
-                    // Python: v = str(m[k]); ev = ...; t[k] = f'OPPAI:{ev}'
-                    // We only encrypt if we can turn it into a string safely.
-                    // And we should probably only encrypt keys that end up in metadata.
-                    // T2IParamTypes.TryGetType checks if HideFromMetadata.
-
-                    if (T2IParamTypes.TryGetType(key, out T2IParamType type, e.UserInput))
-                    {
-                        if (type.HideFromMetadata) continue;
-                    }
-
-                    // Convert to string same way metadata generator does
-                    string valStr = $"{val}";
-                    string encryptedVal = EncryptString(valStr, password);
-                    e.UserInput.InternalSet.ValuesInput[key] = $"OPPAI:{encryptedVal}";
+                    if (type.HideFromMetadata) continue;
                 }
-            }
 
-            // Also encrypt ExtraMeta
-            var extraKeys = e.UserInput.ExtraMeta.Keys.ToList();
-            foreach (var key in extraKeys)
-            {
-                if (e.UserInput.ExtraMeta.TryGetValue(key, out object val))
-                {
-                    string valStr = $"{val}";
-                    string encryptedVal = EncryptString(valStr, password);
-                    e.UserInput.ExtraMeta[key] = $"OPPAI:{encryptedVal}";
-                }
+                string valStr = $"{val}";
+                string encryptedVal = EncryptString(valStr, password);
+                userInput.InternalSet.ValuesInput[key] = $"OPPAI:{encryptedVal}";
             }
-
-            // Add Encryption Markers
-            e.UserInput.ExtraMeta["Encrypt"] = "pixel_shuffle_3";
-            string pwdSha = GetSHA256(password);
-            string verifySha = GetSHA256(pwdSha + "Encrypt");
-            e.UserInput.ExtraMeta["EncryptPwdSha"] = verifySha;
         }
-        catch (Exception ex)
+
+        // Also encrypt ExtraMeta
+        var extraKeys = userInput.ExtraMeta.Keys.ToList();
+        foreach (var key in extraKeys)
         {
-            Logs.Error($"Failed to encrypt metadata: {ex}");
+            if (userInput.ExtraMeta.TryGetValue(key, out object val))
+            {
+                string valStr = $"{val}";
+                string encryptedVal = EncryptString(valStr, password);
+                userInput.ExtraMeta[key] = $"OPPAI:{encryptedVal}";
+            }
         }
+
+        // Add Encryption Markers
+        userInput.ExtraMeta["Encrypt"] = "pixel_shuffle_3";
+        string pwdSha = GetSHA256(password);
+        string verifySha = GetSHA256(pwdSha + "Encrypt");
+        userInput.ExtraMeta["EncryptPwdSha"] = verifySha;
     }
 
     // --- Helper Methods ---
@@ -129,8 +138,6 @@ public class SdImageEncryptionExtension : Extension
     private string GetRange(string input, int offset, int range_len = 8)
     {
         offset = offset % input.Length;
-        // (input * 2)[offset:offset + range_len]
-        // Optimization: avoid string concat if possible, but string is short (64 chars usually).
         string doubled = input + input;
         return doubled.Substring(offset, range_len);
     }
@@ -154,15 +161,10 @@ public class SdImageEncryptionExtension : Extension
         for (int i = 0; i < length; i++)
         {
             int s_idx = length - i - 1;
-            // to_index = int(GetRange(sha_key, i, range_len=8), 16) % (arr_len - i)
             string rangeHex = GetRange(sha_key, i, 8);
-            // Parse hex string to long first to avoid overflow, then modulo.
-            // But wait, 8 hex chars = 32 bits. long is 64 bits.
-            // int.Parse with NumberStyles.HexNumber
             long val = long.Parse(rangeHex, System.Globalization.NumberStyles.HexNumber);
             int to_index = (int)(val % (length - i));
 
-            // Swap
             int temp = arr[s_idx];
             arr[s_idx] = arr[to_index];
             arr[to_index] = temp;
@@ -175,18 +177,10 @@ public class SdImageEncryptionExtension : Extension
         int w = image.Width;
         int h = image.Height;
 
-        // Python:
-        // x = np.arange(w)
-        // ShuffleArray(x, pw)
-        // y = np.arange(h)
-        // ShuffleArray(y, GetSHA256(pw))
-
         int[] x_perm = ShuffleArray(w, pw);
         int[] y_perm = ShuffleArray(h, GetSHA256(pw));
 
         // Create a new image for the result
-        // We cannot easily do this in-place without a buffer.
-        // We will create a new image of the same size.
         var newImage = new Image<Rgba32>(w, h);
 
         for (int y = 0; y < h; y++)
@@ -197,7 +191,7 @@ public class SdImageEncryptionExtension : Extension
             }
         }
 
-        // Copy back to original image
+        // Copy back to original image (In-Place Modification)
         for (int y = 0; y < h; y++)
         {
             for (int x = 0; x < w; x++)
@@ -211,15 +205,16 @@ public class SdImageEncryptionExtension : Extension
 
     private string EncryptString(string input, string password)
     {
-        var sb = new StringBuilder();
-        for (int i = 0; i < input.Length; i++)
+        // Safe Byte-XOR implementation
+        byte[] inputBytes = Encoding.UTF8.GetBytes(input);
+        byte[] pwdBytes = Encoding.UTF8.GetBytes(password);
+        byte[] result = new byte[inputBytes.Length];
+
+        for (int i = 0; i < inputBytes.Length; i++)
         {
-            char c = input[i];
-            char p = password[i % password.Length];
-            int xored = (int)c ^ (int)p;
-            sb.Append((char)xored);
+            result[i] = (byte)(inputBytes[i] ^ pwdBytes[i % pwdBytes.Length]);
         }
-        byte[] bytes = Encoding.UTF8.GetBytes(sb.ToString());
-        return Convert.ToBase64String(bytes);
+
+        return Convert.ToBase64String(result);
     }
 }
