@@ -75,15 +75,27 @@ class SdImageEncryption {
 
     static decryptString(b64, password) {
         try {
-            const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+            // C#: Base64 -> UTF8 Bytes -> String(XOR'd chars)
+            // So JS: Base64 -> Bytes -> UTF8 Decode -> String(XOR'd chars)
+
+            const binaryString = atob(b64);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+
+            // Decode UTF-8 to get the string of XOR'd characters
+            const xoredString = new TextDecoder().decode(bytes);
+
             const decrypted = [];
-            for (let i = 0; i < bytes.length; i++) {
-                const c = bytes[i];
+            for (let i = 0; i < xoredString.length; i++) {
+                const c = xoredString.charCodeAt(i);
                 const p = password.charCodeAt(i % password.length);
                 decrypted.push(String.fromCharCode(c ^ p));
             }
             return decrypted.join('');
         } catch (e) {
+            console.error("SdImageEncryption: Decryption failed", e);
             return "Decryption Failed";
         }
     }
