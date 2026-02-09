@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using SwarmUI.Core;
 using SwarmUI.Utils;
 using SwarmUI.Text2Image;
+using SwarmUI.Media;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing;
@@ -99,6 +100,9 @@ public class SdImageEncryptionExtension : Extension
                 // We use Image.ISImgToPngBytes to get bytes, or just construct it?
                 // SwarmUI.Utils.Image takes (ISImage) constructor.
                 output.Img = new SwarmUI.Utils.Image(imageToEncrypt);
+
+                // Also overwrite the Task<MediaFile> to ensure the encrypted image is used for saving
+                output.ActualFileTask = Task.FromResult((MediaFile)output.Img);
 
                 // Dispose the temporary image
                 // imageToEncrypt.Dispose(); // Wait, if we passed it to SwarmUI.Utils.Image, does it take ownership?
