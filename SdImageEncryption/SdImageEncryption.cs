@@ -37,10 +37,10 @@ public class SdImageEncryptionExtension : Extension
         ScriptFiles.Add("Assets/decrypt_viewer.js");
 
         // Hook into the PostBatchEvent
-        T2IEngine.PostBatchEvent += PostBatchEvent;
+        T2IEngine.PostGenerateEvent += PostGenerateEvent;
     }
 
-    private void PostBatchEvent(T2IEngine.PostBatchEventParams e)
+    private void PostGenerateEvent(T2IEngine.PostGenerationEventParams e)
     {
         // Check if encryption password is set in the user input
         if (!e.UserInput.TryGet(EncryptionPassword, out string password) || string.IsNullOrWhiteSpace(password))
@@ -48,73 +48,79 @@ public class SdImageEncryptionExtension : Extension
             return;
         }
 
-        foreach (var output in e.Images)
+        // Encrypt Pixels
+        if (e.File is SwarmUI.Utils.Image img)
         {
-            // The image might be null if it's not loaded or failed
-            if (output.Img == null)
-            {
-                continue;
-            }
-
             try
             {
-                // Access the underlying ImageSharp image
-                // output.Img is SwarmUI.Utils.Image, which has ToIS property returning SixLabors.ImageSharp.Image
-                var img = output.Img.ToIS;
+                var isImg = img.ToIS;
+                using var rgbaImg = isImg.CloneAs<Rgba32>();
+                EncryptImage(rgbaImg, password);
 
-                // We need to cast it to Image<Rgba32> to process pixels efficiently
-                // If it's not Rgba32, we clone it as such
-                Image<Rgba32> imageToEncrypt = img.CloneAs<Rgba32>();
-
-                // Encrypt the image
-                EncryptImage(imageToEncrypt, password);
-
-                // Update metadata
-                var pngMeta = imageToEncrypt.Metadata.GetPngMetadata();
-
-                // Encrypt existing tags
-                var keys = pngMeta.TextData.Select(t => t.Keyword).ToList();
-                var tagList = new[] { "parameters", "UserComment" };
-
-                foreach (var tag in tagList)
-                {
-                    var existing = pngMeta.TextData.FirstOrDefault(t => t.Keyword == tag);
-                    if (existing.Keyword == tag)
-                    {
-                        string encryptedVal = EncryptString(existing.Value, password);
-                        pngMeta.TextData.Remove(existing);
-                        pngMeta.TextData.Add(new(tag, $"OPPAI:{encryptedVal}", "", ""));
-                    }
-                }
-
-                // Add encryption marker
-                pngMeta.TextData.Add(new("Encrypt", "pixel_shuffle_3", "", ""));
-
-                // Add EncryptPwdSha
-                string pwdSha = GetSHA256(password);
-                string verifySha = GetSHA256(pwdSha + "Encrypt");
-                pngMeta.TextData.Add(new("EncryptPwdSha", verifySha, "", ""));
-
-                // Replace the original image with the encrypted one
-                // We wrap it back into SwarmUI.Utils.Image
-                // We use Image.ISImgToPngBytes to get bytes, or just construct it?
-                // SwarmUI.Utils.Image takes (ISImage) constructor.
-                output.Img = new SwarmUI.Utils.Image(imageToEncrypt);
-
-                // Also overwrite the Task<MediaFile> to ensure the encrypted image is used for saving
-                output.ActualFileTask = Task.FromResult((MediaFile)output.Img);
-
-                // Dispose the temporary image
-                // imageToEncrypt.Dispose(); // Wait, if we passed it to SwarmUI.Utils.Image, does it take ownership?
-                // SwarmUI.Utils.Image(ISImage) converts it to PNG bytes immediately according to source code I read.
-                // public Image(ISImage img) : this(ImageFile.ISImgToPngBytes(img), MediaType.ImagePng)
-                // So it converts to bytes. So we can dispose our local copy.
-                imageToEncrypt.Dispose();
+                // Update the image data
+                // We must use reflection or public field if available. RawData is public.
+                img.RawData = ImageFile.ISImgToPngBytes(rgbaImg);
+                img._CacheISImg = null; // Invalidate cache so it reloads from new RawData
             }
             catch (Exception ex)
             {
-                Logs.Error($"Failed to encrypt image: {ex}");
+                Logs.Error($"Failed to encrypt image pixels: {ex}");
             }
+        }
+
+        // Encrypt Metadata
+        // We modify the UserInput so that when metadata is generated later, it contains encrypted values.
+        try
+        {
+            // Encrypt parameters
+            var keys = e.UserInput.InternalSet.ValuesInput.Keys.ToList();
+            foreach (var key in keys)
+            {
+                // Don't encrypt the password itself if it's there (it shouldn't be in metadata usually but just in case)
+                // Also skip non-string values or complex objects?
+                // Python version converts value to string and encrypts.
+                // We should be careful not to break Swarm's internal logic if it relies on these values later (unlikely for PostGenerateEvent).
+
+                if (e.UserInput.InternalSet.ValuesInput.TryGetValue(key, out object val))
+                {
+                    // Python: v = str(m[k]); ev = ...; t[k] = f'OPPAI:{ev}'
+                    // We only encrypt if we can turn it into a string safely.
+                    // And we should probably only encrypt keys that end up in metadata.
+                    // T2IParamTypes.TryGetType checks if HideFromMetadata.
+
+                    if (T2IParamTypes.TryGetType(key, out T2IParamType type, e.UserInput))
+                    {
+                        if (type.HideFromMetadata) continue;
+                    }
+
+                    // Convert to string same way metadata generator does
+                    string valStr = $"{val}";
+                    string encryptedVal = EncryptString(valStr, password);
+                    e.UserInput.InternalSet.ValuesInput[key] = $"OPPAI:{encryptedVal}";
+                }
+            }
+
+            // Also encrypt ExtraMeta
+            var extraKeys = e.UserInput.ExtraMeta.Keys.ToList();
+            foreach (var key in extraKeys)
+            {
+                if (e.UserInput.ExtraMeta.TryGetValue(key, out object val))
+                {
+                    string valStr = $"{val}";
+                    string encryptedVal = EncryptString(valStr, password);
+                    e.UserInput.ExtraMeta[key] = $"OPPAI:{encryptedVal}";
+                }
+            }
+
+            // Add Encryption Markers
+            e.UserInput.ExtraMeta["Encrypt"] = "pixel_shuffle_3";
+            string pwdSha = GetSHA256(password);
+            string verifySha = GetSHA256(pwdSha + "Encrypt");
+            e.UserInput.ExtraMeta["EncryptPwdSha"] = verifySha;
+        }
+        catch (Exception ex)
+        {
+            Logs.Error($"Failed to encrypt metadata: {ex}");
         }
     }
 
@@ -182,30 +188,6 @@ public class SdImageEncryptionExtension : Extension
         // We cannot easily do this in-place without a buffer.
         // We will create a new image of the same size.
         var newImage = new Image<Rgba32>(w, h);
-
-        // a[v] = p[y[v]] -> Shuffle Rows
-        // a = np.transpose(a, axes=(1, 0, 2)) -> Transpose
-        // a[v] = p[x[v]] -> Shuffle Rows (Columns)
-        // a = np.transpose(a, axes=(1, 0, 2)) -> Transpose Back
-
-        // Result: dest[x, y] = source[x_perm[x], y_perm[y]]
-
-        // We need to be careful about matching the Python logic exactly.
-        // In my thought process I derived: Final[x, y] = Original[x_perm[x], y_perm[y]]
-        // Let's verify again.
-        // Python:
-        // 1. Row shuffle: Dest1[x, y] = Src[x, y_perm[y]]
-        // 2. Transpose: Dest2[x, y] = Dest1[y, x] = Src[y, y_perm[x]]
-        // 3. Row shuffle (using x_perm): Dest3[x, y] = Dest2[x, x_perm[y]] = Src[x_perm[y], y_perm[x]]
-        // 4. Transpose: Dest4[x, y] = Dest3[y, x] = Src[x_perm[x], y_perm[y]]
-        // Yes, Dest4[x, y] takes pixel from Src at (x_perm[x], y_perm[y]).
-
-        // Wait, Python ShuffleArray(x, pw) shuffles the array x.
-        // p = a.copy()
-        // for v in range(w): a[v] = p[x[v]]
-        // This sets row v of 'a' to row x[v] of 'p'.
-        // So a[v] comes from p[x[v]].
-        // Yes, my derivation is correct.
 
         for (int y = 0; y < h; y++)
         {

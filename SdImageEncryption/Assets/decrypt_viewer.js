@@ -6,6 +6,7 @@ class SdImageEncryption {
 
         // Watch for new images
         const observer = new MutationObserver((mutations) => {
+            this.addClearButton(); // Check if we need to add button
             for (const mutation of mutations) {
                 for (const node of mutation.addedNodes) {
                     if (node.tagName === 'IMG') {
@@ -20,6 +21,29 @@ class SdImageEncryption {
 
         // Also process existing images
         document.querySelectorAll('img').forEach(img => this.processImage(img));
+
+        this.addClearButton();
+    }
+
+    static addClearButton() {
+        const input = document.getElementById('input_encryptionpassword');
+        if (!input) return;
+
+        if (document.getElementById('btn_encryption_clear')) return;
+
+        const btn = document.createElement('button');
+        btn.id = 'btn_encryption_clear';
+        btn.className = 'basic-button';
+        btn.innerText = 'Reset';
+        btn.title = "Clear the encryption password";
+        btn.style.marginLeft = '0.5rem';
+        btn.onclick = () => {
+            input.value = '';
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+        };
+
+        input.parentNode.appendChild(btn);
     }
 
     static async processImage(img) {
