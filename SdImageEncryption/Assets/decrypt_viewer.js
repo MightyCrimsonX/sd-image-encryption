@@ -48,23 +48,10 @@ class SdImageEncryption {
     }
 
     static hookMetadata() {
-        // SwarmUI displays metadata in various places. We need to intercept or update it.
-        // The most common place is likely a metadata viewer or parameter list.
-        // SwarmUI uses `formatMetadata` helper. We can try to monkey-patch it or
-        // observe metadata elements.
-        // For now, let's look for elements with "param_view_block" class which contains text.
-        // But the text is likely already rendered.
-        // If the metadata JSON itself contains "OPPAI:...", SwarmUI might display it as is.
-
-        // Simple polling/observer approach for now to find OPPAI strings in DOM and decrypt them.
         setInterval(() => this.scanAndDecryptText(), 1000);
     }
 
     static scanAndDecryptText() {
-        // Look for text nodes containing OPPAI:
-        // This is expensive if done on whole body. Let's restrict to likely containers if possible.
-        // Or just use a TreeWalker.
-
         const password = this.getPassword();
         if (!password) return;
 
@@ -72,12 +59,10 @@ class SdImageEncryption {
         let node;
         while(node = walker.nextNode()) {
             if (node.nodeValue.includes('OPPAI:')) {
-                // Decrypt
                 const newVal = node.nodeValue.replace(/OPPAI:([A-Za-z0-9+/=]+)/g, (match, b64) => {
                     try {
                         return this.decryptString(b64, password);
                     } catch (e) {
-                        console.error("Failed to decrypt text", e);
                         return match;
                     }
                 });
@@ -108,22 +93,34 @@ class SdImageEncryption {
 
         try {
             // Check if image source is valid
-            if (!img.src || img.src.startsWith('data:')) return;
+            if (!img.src || img.src.startsWith('data:') || img.src.startsWith('blob:')) return;
 
-            // Fetch image headers to check for Encrypt tag
-            // We fetch the whole image as blob because we might need to decrypt it
-            const response = await fetch(img.src);
+            // Mark as processed early to avoid loops, but we might unset it if we fail
+            img.dataset.sdEncryptedProcessed = "processing";
+
+            // If we are in a protected context (e.g. ngrok), fetch might fail if not careful with credentials.
+            // But usually same-origin is fine.
+            const response = await fetch(img.src, { cache: 'force-cache', credentials: 'include' });
+
+            // It might be a 404 or something
+            if (!response.ok) {
+                img.dataset.sdEncryptedProcessed = "failed";
+                return;
+            }
+
             const blob = await response.blob();
             const buffer = await blob.arrayBuffer();
 
             if (this.isEncrypted(buffer)) {
                 console.log("SdImageEncryption: Found encrypted image", img.src);
-                img.dataset.sdEncryptedProcessed = "true"; // Mark as processed so we don't loop
+                img.dataset.sdEncryptedProcessed = "true";
                 await this.decryptAndReplace(img, blob, buffer);
+            } else {
+                img.dataset.sdEncryptedProcessed = "not-encrypted";
             }
         } catch (e) {
-            // console.error("SdImageEncryption: Error processing image", e);
-            // Silent fail for normal images
+            console.error("SdImageEncryption: Error processing image", img.src, e);
+            img.dataset.sdEncryptedProcessed = "error";
         }
     }
 
@@ -132,13 +129,19 @@ class SdImageEncryption {
         let offset = 8; // Skip PNG signature
         const view = new DataView(buffer);
 
+        // Simple safety check for PNG
+        if (data[0] !== 0x89 || data[1] !== 0x50 || data[2] !== 0x4E || data[3] !== 0x47) {
+            return false;
+        }
+
         while (offset < data.length) {
+            if (offset + 8 > data.length) break;
             const length = view.getUint32(offset);
             const type = new TextDecoder().decode(data.slice(offset + 4, offset + 8));
 
             if (type === 'tEXt') {
+                if (offset + 8 + length > data.length) break;
                 const chunkData = data.slice(offset + 8, offset + 8 + length);
-                // tEXt format: Keyword + null + Text
                 const nullIndex = chunkData.indexOf(0);
                 if (nullIndex > -1) {
                     const keyword = new TextDecoder().decode(chunkData.slice(0, nullIndex));
@@ -156,20 +159,12 @@ class SdImageEncryption {
     }
 
     static async decryptAndReplace(img, blob, buffer) {
-        // Get password
         let password = this.getPassword();
         if (!password) {
-            // Only blur if we *know* it's encrypted but lack password
             img.style.filter = "blur(10px)";
             img.title = "Encrypted Image - Enter password in settings to view";
-            // Mark for retry later?
-            img.dataset.sdEncryptedProcessed = ""; // Unset so we retry
             return;
         }
-
-        // Verify password hash if present
-        // We need to parse chunks again to find EncryptPwdSha
-        // ... omitted for brevity/simplicity, logic assumes password is correct or tries anyway
 
         const decryptedBlob = await this.decryptImage(blob, password);
         if (decryptedBlob) {
@@ -178,18 +173,15 @@ class SdImageEncryption {
             img.style.filter = "";
             img.title = "Decrypted Image";
             img.dataset.sdDecrypted = "true";
-
-            // TODO: Also decrypt metadata and update data attributes if SwarmUI uses them
         }
     }
 
     static getPassword() {
-        // Try to find the input in the UI
         const input = document.getElementById('input_encryptionpassword');
         if (input && input.value) {
             return input.value;
         }
-        return this.password; // Fallback to cached password
+        return this.password;
     }
 
     static async sha256(message) {
@@ -201,22 +193,19 @@ class SdImageEncryption {
 
     static getRange(input, offset, rangeLen = 8) {
         offset = offset % input.length;
-        // input * 2
         let doubled = input + input;
         return doubled.substring(offset, offset + rangeLen);
     }
 
     static shuffleArray(length, key) {
-        // key is hex string of SHA256
         let arr = new Int32Array(length);
         for (let i = 0; i < length; i++) arr[i] = i;
 
         for (let i = 0; i < length; i++) {
             let s_idx = length - i - 1;
             let rangeHex = this.getRange(key, i, 8);
-            // We need to parse 8 hex chars = 32 bits.
-            // parseInt handles it, but verify behavior with large numbers (unsigned vs signed)
-            // 8 hex chars max is FFFFFFFF = 4294967295. JS numbers are doubles, safe up to 2^53.
+            // JS Numbers are 64-bit float, integer precision up to 53 bits.
+            // 8 hex digits = 32 bits. This is safe.
             let val = parseInt(rangeHex, 16);
             let to_index = val % (length - i);
 
@@ -235,7 +224,6 @@ class SdImageEncryption {
         const ctx = canvas.getContext('2d', { willReadFrequently: true });
         ctx.drawImage(imgBitmap, 0, 0);
         const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        // Use Uint32Array to manipulate pixels directly (RGBA)
         const pixels = new Uint32Array(imageData.data.buffer);
 
         const w = canvas.width;
@@ -249,13 +237,31 @@ class SdImageEncryption {
 
         const newPixels = new Uint32Array(pixels.length);
 
-        // Decrypt logic: Original[x_perm[x], y_perm[y]] = Shuffled[x, y]
         for (let y = 0; y < h; y++) {
             for (let x = 0; x < w; x++) {
                 let srcIdx = y * w + x;
-                let destX = x_perm[x];
-                let destY = y_perm[y];
-                let destIdx = destY * w + destX;
+
+                // If encrypted: dest[x, y] = source[x_perm[x], y_perm[y]]
+                // So source[x_perm[x], y_perm[y]] is the pixel we want to put at dest[x, y]
+                // Wait, decrypting is reversing the encryption.
+
+                // C# Encryption:
+                // newImage[x, y] = image[x_perm[x], y_perm[y]];
+                // Meaning: The pixel at (x,y) in EncryptedImage comes from (x_perm[x], y_perm[y]) in OriginalImage.
+                // Encrypted(x, y) = Original(x_perm[x], y_perm[y])
+
+                // To decrypt, we want to recover Original.
+                // Let u = x_perm[x], v = y_perm[y].
+                // Original(u, v) = Encrypted(x, y).
+
+                // So we iterate x,y of Encrypted image (source here).
+                // And we place that pixel at (u, v) in the Decrypted image (dest here).
+
+                let u = x_perm[x];
+                let v = y_perm[y];
+
+                let destIdx = v * w + u; // Destination is Original(u, v)
+
                 newPixels[destIdx] = pixels[srcIdx];
             }
         }
