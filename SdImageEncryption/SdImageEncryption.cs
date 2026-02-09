@@ -15,16 +15,21 @@ public class SdImageEncryptionExtension : Extension
 {
     public static T2IRegisteredParam<string> EncryptionPassword;
 
+    public static T2IParamGroup GroupEncryption;
+
     public override void OnInit()
     {
+        // Define the encryption group
+        GroupEncryption = new("Encryption", Toggles: false, Open: true, OrderPriority: 15, Description: "Scramble images before saving.");
+
         // Register the "Encryption Password" parameter
         EncryptionPassword = T2IParamTypes.Register<string>(new T2IParamType(
             "Encryption Password",
             "Password to encrypt the image pixels and metadata with. If set, the image will be scrambled before saving.",
             "",
-            FeatureFlag: "encrypt_image", // Optional, just to categorize it if needed, or leave null
-            OrderPriority: 100, // Put it somewhere visible? Or hidden by default?
-            Group: T2IParamTypes.GroupSwarmInternal // Put in internal/advanced group for now
+            FeatureFlag: null,
+            OrderPriority: 1,
+            Group: GroupEncryption
         ));
 
         // Register the JS viewer
